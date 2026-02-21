@@ -94,7 +94,7 @@ client.on(Events.MessageCreate, async (message) => {
   if (!reply?.trim()) return;
 
   try {
-    await message.reply(reply);
+    await message.channel.send(reply);
   } catch (err) {
     console.error('Failed to send reply:', err.message);
   }
@@ -103,23 +103,27 @@ client.on(Events.MessageCreate, async (message) => {
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand() || interaction.commandName !== 'clear') return;
 
+  await interaction.deferReply({ ephemeral: true }).catch(() => {});
   const channel = interaction.channel;
+  const sendChannelMessage = async (content) => {
+    if (typeof channel?.send !== 'function') return;
+    await channel.send(content).catch(() => {});
+  };
+
   if (typeof channel?.bulkDelete !== 'function') {
-    await interaction.reply({
-      content: "Can't clear messages in this channel.",
-      ephemeral: true,
-    }).catch(() => {});
+    await sendChannelMessage("Can't clear messages in this channel.");
+    await interaction.deleteReply().catch(() => {});
     return;
   }
 
-  await interaction.deferReply({ ephemeral: true });
-
   try {
     const deleted = await channel.bulkDelete(100, true);
-    await interaction.editReply(`Cleared ${deleted.size} message(s).`).catch(() => {});
+    await sendChannelMessage(`Cleared ${deleted.size} message(s).`);
   } catch (err) {
     console.error('Clear error:', err.message);
-    await interaction.editReply(`Failed: ${err.message}`).catch(() => {});
+    await sendChannelMessage(`Failed: ${err.message}`);
+  } finally {
+    await interaction.deleteReply().catch(() => {});
   }
 });
 
