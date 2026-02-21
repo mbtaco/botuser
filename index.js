@@ -46,20 +46,17 @@ async function isReplyToBot(message) {
   }
 }
 
-async function buildConversationContext(channel, newMessage) {
+async function buildConversationMessages(channel, newMessage, botId) {
   const messages = await channel.messages.fetch({ limit: RECENT_MESSAGES_LIMIT });
   const sorted = [...messages.values()].sort(
     (a, b) => a.createdTimestamp - b.createdTimestamp
   );
-  const lines = sorted.map(formatMessage);
-  let conversation = lines.join('\n');
   const replyToBot = await isReplyToBot(newMessage);
-  if (replyToBot) {
-    conversation =
-      'Note: The last message is a direct reply to the bot. The bot should respond.\n\n' +
-      conversation;
-  }
-  return conversation;
+  const turns = sorted.map((msg) => ({
+    role: msg.author.id === botId ? 'assistant' : 'user',
+    content: formatMessage(msg),
+  }));
+  return { turns, replyToBot };
 }
 
 client.once(Events.ClientReady, async (c) => {
@@ -81,12 +78,17 @@ client.once(Events.ClientReady, async (c) => {
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
 
-  const conversation = await buildConversationContext(message.channel, message);
+  const { turns, replyToBot } = await buildConversationMessages(
+    message.channel,
+    message,
+    message.client.user.id
+  );
   const botName = message.client.user.username;
 
   const { reply } = await shouldRespondAndReply({
-    conversation,
+    messages: turns,
     botName,
+    replyToBot,
   });
 
   if (!reply?.trim()) return;
