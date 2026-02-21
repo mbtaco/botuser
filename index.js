@@ -1,62 +1,24 @@
 require('dotenv').config();
+const http = require('http');
 const {
   Client,
   Events,
   IntentsBitField,
-  ActionRowBuilder,
-  ButtonBuilder,
   PermissionsBitField,
+  REST,
+  Routes,
+  SlashCommandBuilder,
 } = require('discord.js');
-const { ButtonStyle } = require('discord-api-types/v10');
 const { shouldRespondAndReply } = require('./lib/groq');
-const { getAdminCommand, getOriginalMessage } = require('./lib/adminCommands');
+
+const PORT = Number(process.env.PORT) || 8000;
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('ok');
+});
+server.listen(PORT, () => console.log(`Health check listening on port ${PORT}`));
 
 const RECENT_MESSAGES_LIMIT = 15;
-const ADMIN_CONFIRM_PREFIX = 'admin_confirm:';
-const ADMIN_PAYLOAD_SEP = '||';
-const RENAME_PAYLOAD_SEP = '\x01';
-const CUSTOM_ID_MAX = 100;
-const COMMANDS_WITH_ROLE_NAME = ['createRole', 'deleteRole', 'addToRole', 'removeFromRole'];
-const COMMAND_RENAME_ROLE = 'renameRole';
-const BUTTON_LABEL_MAX = 80;
-
-function getConfirmButtonLabel(adminCommand, message, { roleName, newRoleName }) {
-  const users = message.mentions?.users ? [...message.mentions.users.values()] : [];
-  const userNames = users.map((u) => u.username).slice(0, 2).join(', ');
-  const roleMention = message.mentions?.roles?.first();
-  const roleDisplay = roleMention?.name ?? roleName ?? 'role';
-
-  switch (adminCommand) {
-    case 'clearMessages':
-      return 'Clear messages in this channel';
-    case 'kickUser':
-      return userNames ? `Kick ${userNames}` : null;
-    case 'banUser':
-      return userNames ? `Ban ${userNames}` : null;
-    case 'muteUser':
-      return userNames ? `Timeout ${userNames}` : null;
-    case 'createRole':
-      return roleName ? `Create role "${roleName}"` : null;
-    case 'deleteRole':
-      return roleDisplay ? `Delete role "${roleDisplay}"` : null;
-    case 'renameRole':
-      return newRoleName ? `Rename to "${newRoleName}"` : null;
-    case 'addToRole':
-      return userNames && roleDisplay ? `Add ${userNames} to ${roleDisplay}` : (roleDisplay ? `Add to ${roleDisplay}` : null);
-    case 'removeFromRole':
-      return userNames && roleDisplay ? `Remove ${userNames} from ${roleDisplay}` : (roleDisplay ? `Remove from ${roleDisplay}` : null);
-    case 'disconnectUser':
-      return userNames ? `Disconnect ${userNames}` : null;
-    case 'moveUser':
-      return userNames ? `Move ${userNames}` : null;
-    case 'moveAllUsers':
-      return 'Move everyone';
-    case 'disconnectAllUsers':
-      return 'Disconnect everyone';
-    default:
-      return null;
-  }
-}
 
 const client = new Client({
   intents: [
@@ -84,14 +46,6 @@ async function isReplyToBot(message) {
   }
 }
 
-function isServerAdmin(message) {
-  if (!message.member || !message.guild) return false;
-  return (
-    message.guild.ownerId === message.author.id ||
-    message.member.permissions.has(PermissionsBitField.Flags.Administrator)
-  );
-}
-
 async function buildConversationContext(channel, newMessage) {
   const messages = await channel.messages.fetch({ limit: RECENT_MESSAGES_LIMIT });
   const sorted = [...messages.values()].sort(
@@ -108,8 +62,20 @@ async function buildConversationContext(channel, newMessage) {
   return conversation;
 }
 
-client.once(Events.ClientReady, (c) => {
+client.once(Events.ClientReady, async (c) => {
   console.log(`Logged in as ${c.user.tag}`);
+
+  const clearCommand = new SlashCommandBuilder()
+    .setName('clear')
+    .setDescription('Clear recent messages in this channel')
+    .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageMessages);
+
+  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+  await rest.put(Routes.applicationCommands(c.user.id), {
+    body: [clearCommand.toJSON()],
+  }).catch((err) => {
+    console.error('Failed to register slash command:', err.message);
+  });
 });
 
 client.on(Events.MessageCreate, async (message) => {
@@ -117,96 +83,41 @@ client.on(Events.MessageCreate, async (message) => {
 
   const conversation = await buildConversationContext(message.channel, message);
   const botName = message.client.user.username;
-  const isAdmin = isServerAdmin(message);
 
-  const { reply, adminCommand, roleName, newRoleName } = await shouldRespondAndReply({
+  const { reply } = await shouldRespondAndReply({
     conversation,
     botName,
-    isAdmin,
   });
 
   if (!reply?.trim()) return;
 
   try {
-    const cmd = adminCommand ? getAdminCommand(adminCommand) : null;
-    if (cmd) {
-      let customId = `${ADMIN_CONFIRM_PREFIX}${adminCommand}`;
-      const maxPayload = CUSTOM_ID_MAX - customId.length - ADMIN_PAYLOAD_SEP.length - 2;
-      if (COMMANDS_WITH_ROLE_NAME.includes(adminCommand) && roleName) {
-        const payload = encodeURIComponent(roleName).slice(0, maxPayload);
-        customId = `${customId}${ADMIN_PAYLOAD_SEP}${payload}`;
-      } else if (adminCommand === COMMAND_RENAME_ROLE && roleName && newRoleName) {
-        const p1 = encodeURIComponent(roleName).slice(0, 35);
-        const p2 = encodeURIComponent(newRoleName).slice(0, 35);
-        const payload = (p1 + RENAME_PAYLOAD_SEP + p2).slice(0, maxPayload);
-        customId = `${customId}${ADMIN_PAYLOAD_SEP}${payload}`;
-      }
-      const specificLabel = getConfirmButtonLabel(adminCommand, message, { roleName, newRoleName });
-      const label = (specificLabel && specificLabel.length <= BUTTON_LABEL_MAX ? specificLabel : cmd.buttonLabel).slice(0, BUTTON_LABEL_MAX);
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(customId)
-          .setLabel(label)
-          .setStyle(ButtonStyle.Danger)
-      );
-      await message.reply({ content: reply, components: [row] });
-    } else {
-      await message.reply(reply);
-    }
+    await message.reply(reply);
   } catch (err) {
     console.error('Failed to send reply:', err.message);
   }
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isButton() || !interaction.customId?.startsWith(ADMIN_CONFIRM_PREFIX)) return;
+  if (!interaction.isChatInputCommand() || interaction.commandName !== 'clear') return;
 
-  const afterPrefix = interaction.customId.slice(ADMIN_CONFIRM_PREFIX.length);
-  const sepIdx = afterPrefix.indexOf(ADMIN_PAYLOAD_SEP);
-  const commandId = sepIdx >= 0 ? afterPrefix.slice(0, sepIdx) : afterPrefix;
-  const payloadEnc = sepIdx >= 0 ? afterPrefix.slice(sepIdx + ADMIN_PAYLOAD_SEP.length) : '';
-  const cmd = getAdminCommand(commandId);
-  if (!cmd) return;
-
-  const options = {};
-  if (payloadEnc) {
-    try {
-      if (commandId === COMMAND_RENAME_ROLE && payloadEnc.includes(RENAME_PAYLOAD_SEP)) {
-        const [a, b] = payloadEnc.split(RENAME_PAYLOAD_SEP);
-        if (a) options.roleName = decodeURIComponent(a);
-        if (b) options.newRoleName = decodeURIComponent(b);
-      } else if (COMMANDS_WITH_ROLE_NAME.includes(commandId)) {
-        options.roleName = decodeURIComponent(payloadEnc);
-      }
-    } catch {
-      // ignore bad payload
-    }
-  }
-
-  const member = interaction.guild?.members.resolve(interaction.user.id);
-  const isAdmin =
-    member &&
-    (interaction.guild.ownerId === interaction.user.id ||
-      member.permissions.has(PermissionsBitField.Flags.Administrator));
-  if (!isAdmin) {
+  const channel = interaction.channel;
+  if (typeof channel?.bulkDelete !== 'function') {
     await interaction.reply({
-      content: "You don't have permission to run this.",
+      content: "Can't clear messages in this channel.",
       ephemeral: true,
     }).catch(() => {});
     return;
   }
 
-  await interaction.deferUpdate();
-
-  const originalMessage = await getOriginalMessage(interaction);
+  await interaction.deferReply({ ephemeral: true });
 
   try {
-    await cmd.handler(interaction, originalMessage, options);
+    const deleted = await channel.bulkDelete(100, true);
+    await interaction.editReply(`Cleared ${deleted.size} message(s).`).catch(() => {});
   } catch (err) {
-    console.error(`Admin command ${commandId} error:`, err.message);
-    await interaction.followUp({
-      content: `Failed: ${err.message}`,
-    }).catch(() => {});
+    console.error('Clear error:', err.message);
+    await interaction.editReply(`Failed: ${err.message}`).catch(() => {});
   }
 });
 
